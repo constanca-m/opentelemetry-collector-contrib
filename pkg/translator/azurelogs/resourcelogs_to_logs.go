@@ -10,12 +10,13 @@ import (
 	"strconv"
 	"time"
 
-	gojson "github.com/goccy/go-json"
+	jsoniter "github.com/json-iterator/go"
 	"github.com/relvacode/iso8601"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
 	conventions "go.opentelemetry.io/collector/semconv/v1.22.0"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 )
 
 const (
@@ -84,17 +85,23 @@ func (r ResourceLogsUnmarshaler) UnmarshalLogs(buf []byte) (plog.Logs, error) {
 	l := plog.NewLogs()
 
 	var azureLogs azureRecords
-	decoder := gojson.NewDecoder(bytes.NewReader(buf))
+	decoder := jsoniter.NewDecoder(bytes.NewReader(buf))
 	if err := decoder.Decode(&azureLogs); err != nil {
 		return l, err
 	}
 
+	var resourceIDs []string
 	azureResourceLogs := make(map[string][]azureLogRecord)
-	for _, log := range azureLogs.Records {
-		azureResourceLogs[log.ResourceID] = append(azureResourceLogs[log.ResourceID], log)
+	for _, azureLog := range azureLogs.Records {
+		azureResourceLogs[azureLog.ResourceID] = append(azureResourceLogs[azureLog.ResourceID], azureLog)
+		keyExists := slices.Contains(resourceIDs, azureLog.ResourceID)
+		if !keyExists {
+			resourceIDs = append(resourceIDs, azureLog.ResourceID)
+		}
 	}
 
-	for resourceID, logs := range azureResourceLogs {
+	for _, resourceID := range resourceIDs {
+		logs := azureResourceLogs[resourceID]
 		resourceLogs := l.ResourceLogs().AppendEmpty()
 		scopeLogs := resourceLogs.ScopeLogs().AppendEmpty()
 		scopeLogs.Scope().SetName(scopeName)
