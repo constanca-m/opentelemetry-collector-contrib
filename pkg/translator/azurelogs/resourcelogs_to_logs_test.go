@@ -277,7 +277,7 @@ func TestAsSeverity(t *testing.T) {
 
 	for input, expected := range tests {
 		t.Run(input, func(t *testing.T) {
-			assert.Equal(t, expected, asSeverity(json.Number(input)))
+			assert.Equal(t, expected, asSeverity(input))
 		})
 	}
 }
@@ -314,7 +314,7 @@ func TestExtractRawAttributes(t *testing.T) {
 	resultDescription := "result.description"
 	callerIPAddress := "127.0.0.1"
 	correlationID := "edb70d1a-eec2-4b4c-b2f4-60e3510160ee"
-	level := json.Number("Informational")
+	level := "Informational"
 	location := "location"
 
 	identity := any("someone")
@@ -539,10 +539,6 @@ func TestUnmarshalLogs(t *testing.T) {
 		{
 			file:     "log-maximum.json",
 			expected: expectedMaximum,
-		},
-		{
-			file:     "log-bad-level.json",
-			expected: expectedBadLevel,
 		},
 		{
 			file:     "log-bad-time.json",

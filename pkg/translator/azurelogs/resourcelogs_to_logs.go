@@ -10,13 +10,12 @@ import (
 	"strconv"
 	"time"
 
-	jsoniter "github.com/json-iterator/go"
+	gojson "github.com/goccy/go-json"
 	"github.com/relvacode/iso8601"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
 	conventions "go.opentelemetry.io/collector/semconv/v1.22.0"
 	"go.uber.org/zap"
-	"golang.org/x/exp/slices"
 )
 
 const (
@@ -68,7 +67,7 @@ type azureLogRecord struct {
 	CallerIPAddress   *string      `json:"callerIpAddress"`
 	CorrelationID     *string      `json:"correlationId"`
 	Identity          *any         `json:"identity"`
-	Level             *json.Number `json:"Level"`
+	Level             *string      `json:"Level"`
 	Location          *string      `json:"location"`
 	Properties        *any         `json:"properties"`
 }
@@ -85,23 +84,17 @@ func (r ResourceLogsUnmarshaler) UnmarshalLogs(buf []byte) (plog.Logs, error) {
 	l := plog.NewLogs()
 
 	var azureLogs azureRecords
-	decoder := jsoniter.NewDecoder(bytes.NewReader(buf))
+	decoder := gojson.NewDecoder(bytes.NewReader(buf))
 	if err := decoder.Decode(&azureLogs); err != nil {
 		return l, err
 	}
 
-	var resourceIDs []string
 	azureResourceLogs := make(map[string][]azureLogRecord)
-	for _, azureLog := range azureLogs.Records {
-		azureResourceLogs[azureLog.ResourceID] = append(azureResourceLogs[azureLog.ResourceID], azureLog)
-		keyExists := slices.Contains(resourceIDs, azureLog.ResourceID)
-		if !keyExists {
-			resourceIDs = append(resourceIDs, azureLog.ResourceID)
-		}
+	for _, log := range azureLogs.Records {
+		azureResourceLogs[log.ResourceID] = append(azureResourceLogs[log.ResourceID], log)
 	}
 
-	for _, resourceID := range resourceIDs {
-		logs := azureResourceLogs[resourceID]
+	for resourceID, logs := range azureResourceLogs {
 		resourceLogs := l.ResourceLogs().AppendEmpty()
 		scopeLogs := resourceLogs.ScopeLogs().AppendEmpty()
 		scopeLogs.Scope().SetName(scopeName)
@@ -122,7 +115,7 @@ func (r ResourceLogsUnmarshaler) UnmarshalLogs(buf []byte) (plog.Logs, error) {
 			if log.Level != nil {
 				severity := asSeverity(*log.Level)
 				lr.SetSeverityNumber(severity)
-				lr.SetSeverityText(log.Level.String())
+				lr.SetSeverityText(*log.Level)
 			}
 
 			lr.Attributes().PutStr(conventions.AttributeCloudResourceID, resourceID)
@@ -171,8 +164,8 @@ func asTimestamp(s string, formats ...string) (pcommon.Timestamp, error) {
 // asSeverity converts the Azure log level to equivalent
 // OpenTelemetry severity numbers. If the log level is not
 // valid, then the 'Unspecified' value is returned.
-func asSeverity(number json.Number) plog.SeverityNumber {
-	switch number.String() {
+func asSeverity(level string) plog.SeverityNumber {
+	switch level {
 	case "Informational":
 		return plog.SeverityNumberInfo
 	case "Warning":
@@ -182,11 +175,6 @@ func asSeverity(number json.Number) plog.SeverityNumber {
 	case "Critical":
 		return plog.SeverityNumberFatal
 	default:
-		levelNumber, _ := number.Int64()
-		if levelNumber > 0 {
-			return plog.SeverityNumber(levelNumber)
-		}
-
 		return plog.SeverityNumberUnspecified
 	}
 }
