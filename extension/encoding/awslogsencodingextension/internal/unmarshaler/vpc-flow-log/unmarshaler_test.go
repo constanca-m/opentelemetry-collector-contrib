@@ -170,3 +170,11 @@ func TestUnmarshalLogs_Unsupported(t *testing.T) {
 	_, errCreate := NewVPCFlowLogUnmarshaler("unsupported", component.BuildInfo{}, zap.NewNop())
 	require.ErrorContains(t, errCreate, `unsupported file fileFormat "unsupported" for VPC flow log`)
 }
+
+func TestDelete(t *testing.T) {
+	data, err := os.ReadFile("testdata/vpc_flow_log.log.parquet")
+	require.NoError(t, err)
+
+	err = readParquetContent(data)
+	require.NoError(t, err)
+}
