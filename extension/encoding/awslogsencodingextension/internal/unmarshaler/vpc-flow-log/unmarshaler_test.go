@@ -162,19 +162,52 @@ func TestHandleAddresses(t *testing.T) {
 }
 
 func TestUnmarshalLogs_Parquet(t *testing.T) {
-	_, errCreate := NewVPCFlowLogUnmarshaler(fileFormatParquet, component.BuildInfo{}, zap.NewNop())
-	require.ErrorContains(t, errCreate, "still needs to be implemented")
+	//_, errCreate := NewVPCFlowLogUnmarshaler(fileFormatParquet, component.BuildInfo{}, zap.NewNop())
+	//require.ErrorContains(t, errCreate, "still needs to be implemented")
+
+	t.Parallel()
+
+	dir := "testdata"
+	tests := map[string]struct {
+		content              []byte
+		logsExpectedFilename string
+		expectedErr          string
+	}{
+		"valid_vpc_flow_log": {
+			content:              getLogFromFileInPlainText(t, dir, "vpc_flow_log.log.parquet"),
+			logsExpectedFilename: "parquet_expected.yaml",
+		},
+		//"invalid_gzip_record": {
+		//	content:     []byte("invalid"),
+		//	expectedErr: "failed to decompress content",
+		//},
+	}
+
+	u, errCreate := NewVPCFlowLogUnmarshaler(fileFormatParquet, component.BuildInfo{}, zap.NewNop())
+	require.NoError(t, errCreate)
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			logs, err := u.UnmarshalLogs(test.content)
+
+			if test.expectedErr != "" {
+				require.ErrorContains(t, err, test.expectedErr)
+				return
+			}
+
+			require.NoError(t, err)
+
+			//golden.WriteLogs(t, filepath.Join(dir, test.logsExpectedFilename), logs)
+
+			expectedLogs, err := golden.ReadLogs(filepath.Join(dir, test.logsExpectedFilename))
+			require.NoError(t, err)
+			require.NoError(t, plogtest.CompareLogs(expectedLogs, logs))
+		})
+	}
+
 }
 
 func TestUnmarshalLogs_Unsupported(t *testing.T) {
 	_, errCreate := NewVPCFlowLogUnmarshaler("unsupported", component.BuildInfo{}, zap.NewNop())
 	require.ErrorContains(t, errCreate, `unsupported file fileFormat "unsupported" for VPC flow log`)
-}
-
-func TestDelete(t *testing.T) {
-	data, err := os.ReadFile("testdata/vpc_flow_log.log.parquet")
-	require.NoError(t, err)
-
-	err = readParquetContent(data)
-	require.NoError(t, err)
 }
