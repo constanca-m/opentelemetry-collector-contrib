@@ -4,112 +4,62 @@
 package googlecloudlogentryencodingextension
 
 import (
-	"context"
 	stdjson "encoding/json"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/multierr"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/golden"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/pdatatest/plogtest"
 )
 
 func TestProtoPayload(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		scenario string
 		config   Config
-		expected log
+		wantFile string
 	}{
 		{
-			"AsProtobuf",
-			Config{
+			scenario: "AsProtobuf",
+			config: Config{
 				HandleProtoPayloadAs: HandleAsProtobuf,
 			},
-			log{
-				Body: map[string]any{
-					"@type": "type.googleapis.com/google.cloud.audit.AuditLog",
-					"authenticationInfo": map[string]any{
-						"principalEmail":               "foo@bar.iam.gserviceaccount.com",
-						"principalSubject":             "serviceAccount:foo@bar.iam.gserviceaccount.com",
-						"serviceAccountDelegationInfo": []any{map[string]any{"firstPartyPrincipal": map[string]any{"principalEmail": "foo@bar.iam.gserviceaccount.com"}}},
-					},
-					"authorizationInfo": []any{map[string]any{"resourceAttributes": map[string]any{}}},
-					"methodName":        "SearchProjects",
-					"request": map[string]any{
-						"@type": "type.googleapis.com/google.cloud.resourcemanager.v3.SearchProjectsRequest",
-						"query": "state:active AND NOT projectID:sys-*",
-					},
-					"requestMetadata": map[string]any{
-						"callerIp":                "21.128.18.1",
-						"callerSuppliedUserAgent": "grpc-go/1.62.2,gzip(gfe)",
-						"destinationAttributes":   map[string]any{},
-						"requestAttributes":       map[string]any{},
-					},
-					"resourceName": "projects/project-id",
-					"serviceName":  "cloudresourcemanager.googleapis.com",
-					"status":       map[string]any{},
-				},
-			},
+			wantFile: "testdata/proto_payload/as_protofobuf_expected.yaml",
 		},
 		{
-			"AsJSON",
-			Config{
+			scenario: "AsJSON",
+			config: Config{
 				HandleProtoPayloadAs: HandleAsJSON,
 			},
-			log{
-				Body: map[string]any{
-					"@type": "type.googleapis.com/google.cloud.audit.AuditLog",
-					"authenticationInfo": map[string]any{
-						"principalEmail":               "foo@bar.iam.gserviceaccount.com",
-						"principalSubject":             "serviceAccount:foo@bar.iam.gserviceaccount.com",
-						"serviceAccountDelegationInfo": []any{map[string]any{"firstPartyPrincipal": map[string]any{"principalEmail": "foo@bar.iam.gserviceaccount.com"}}},
-					},
-					"authorizationInfo": []any{map[string]any{"resourceAttributes": map[string]any{}}},
-					"methodName":        "SearchProjects",
-					"request": map[string]any{
-						"@type": "type.googleapis.com/google.cloud.resourcemanager.v3.SearchProjectsRequest",
-						"query": "state:active AND NOT projectID:sys-*",
-					},
-					"requestMetadata": map[string]any{
-						"callerIp":                "21.128.18.1",
-						"callerSuppliedUserAgent": "grpc-go/1.62.2,gzip(gfe)",
-						"destinationAttributes":   map[string]any{},
-						"requestAttributes":       map[string]any{},
-					},
-					"resourceName": "projects/project-id",
-					"serviceName":  "cloudresourcemanager.googleapis.com",
-					"status":       map[string]any{},
-				},
-			},
+			wantFile: "testdata/proto_payload/as_json_expected.yaml",
 		},
 		{
-			"AsText",
-			Config{
+			scenario: "AsText",
+			config: Config{
 				HandleProtoPayloadAs: HandleAsText,
 			},
-			log{
-				Body: "{  \"@type\": \"type.googleapis.com/google.cloud.audit.AuditLog\",  \"status\": {},  \"authenticationInfo\": {    \"principalEmail\": \"foo@bar.iam.gserviceaccount.com\",    \"serviceAccountDelegationInfo\": [      {        \"firstPartyPrincipal\": {          \"principalEmail\": \"foo@bar.iam.gserviceaccount.com\"        }      }    ],    \"principalSubject\": \"serviceAccount:foo@bar.iam.gserviceaccount.com\"  },  \"requestMetadata\": {    \"callerIp\": \"21.128.18.1\",    \"callerSuppliedUserAgent\": \"grpc-go/1.62.2,gzip(gfe)\",    \"requestAttributes\": {},    \"destinationAttributes\": {}  },  \"serviceName\": \"cloudresourcemanager.googleapis.com\",  \"methodName\": \"SearchProjects\",  \"authorizationInfo\": [    {      \"resourceAttributes\": {}    }  ],  \"resourceName\": \"projects/project-id\",  \"request\": {    \"query\": \"state:active AND NOT projectID:sys-*\",    \"@type\": \"type.googleapis.com/google.cloud.resourcemanager.v3.SearchProjectsRequest\"  }}",
-			},
+			wantFile: "testdata/proto_payload/as_text_expected.yaml",
 		},
 	}
 
-	input := "{\"protoPayload\": {  \"@type\": \"type.googleapis.com/google.cloud.audit.AuditLog\",  \"status\": {},  \"authenticationInfo\": {    \"principalEmail\": \"foo@bar.iam.gserviceaccount.com\",    \"serviceAccountDelegationInfo\": [      {        \"firstPartyPrincipal\": {          \"principalEmail\": \"foo@bar.iam.gserviceaccount.com\"        }      }    ],    \"principalSubject\": \"serviceAccount:foo@bar.iam.gserviceaccount.com\"  },  \"requestMetadata\": {    \"callerIp\": \"21.128.18.1\",    \"callerSuppliedUserAgent\": \"grpc-go/1.62.2,gzip(gfe)\",    \"requestAttributes\": {},    \"destinationAttributes\": {}  },  \"serviceName\": \"cloudresourcemanager.googleapis.com\",  \"methodName\": \"SearchProjects\",  \"authorizationInfo\": [    {      \"resourceAttributes\": {}    }  ],  \"resourceName\": \"projects/project-id\",  \"request\": {    \"query\": \"state:active AND NOT projectID:sys-*\",    \"@type\": \"type.googleapis.com/google.cloud.resourcemanager.v3.SearchProjectsRequest\"  }} }"
+	input, err := os.ReadFile("testdata/proto_payload/proto_payload.json")
+	require.NoError(t, err)
+
 	for _, tt := range tests {
-		fn := func(t *testing.T, want log) {
-			extension := newConfiguredExtension(t, &tt.config)
-			defer assert.NoError(t, extension.Shutdown(context.Background()))
-
-			var errs error
-			wantRes, wantLr, err := generateLog(t, want)
-			errs = multierr.Append(errs, err)
-
-			gotRes, gotLr, err := extension.translateLogEntry([]byte(input))
-			errs = multierr.Append(errs, err)
-			errs = multierr.Combine(errs, compareResources(wantRes, gotRes), compareLogRecords(wantLr, gotLr))
-
-			require.NoError(t, errs)
-		}
 		t.Run(tt.scenario, func(t *testing.T) {
-			fn(t, tt.expected)
+			extension := newTestExtension(t, tt.config)
+
+			wantRes, err := golden.ReadLogs(tt.wantFile)
+			require.NoError(t, err)
+
+			gotRes, err := extension.UnmarshalLogs(input)
+			require.NoError(t, err)
+
+			require.NoError(t, plogtest.CompareLogs(wantRes, gotRes))
 		})
 	}
 }
@@ -122,7 +72,12 @@ func TestProtoFieldTypes(t *testing.T) {
 	}{
 		{
 			"String",
-			"{\n  \"protoPayload\": {\n    \"@type\": \"type.googleapis.com/google.cloud.audit.AuditLog\",\n    \"serviceName\": \"OpenTelemetry\"\n  }\n}",
+			`{
+  "protoPayload": {
+    "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
+    "serviceName": "OpenTelemetry"
+  }
+}`,
 			log{
 				Body: map[string]any{
 					"@type":       "type.googleapis.com/google.cloud.audit.AuditLog",
@@ -132,7 +87,16 @@ func TestProtoFieldTypes(t *testing.T) {
 		},
 		{
 			"Boolean",
-			"{\n  \"protoPayload\": {\n    \"@type\": \"type.googleapis.com/google.cloud.audit.AuditLog\",\n    \"authorizationInfo\": [\n      {\n        \"granted\": true\n      }\n    ]\n  }\n}",
+			`{
+  "protoPayload": {
+    "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
+    "authorizationInfo": [
+      {
+        "granted": true
+      }
+    ]
+  }
+}`,
 			log{
 				Body: map[string]any{
 					"@type":             "type.googleapis.com/google.cloud.audit.AuditLog",
@@ -142,7 +106,20 @@ func TestProtoFieldTypes(t *testing.T) {
 		},
 		{
 			"EnumByString",
-			"{\n  \"protoPayload\": {\n    \"@type\": \"type.googleapis.com/google.cloud.audit.AuditLog\",\n    \"policyViolationInfo\": {\n      \"orgPolicyViolationInfo\": {\n        \"violationInfo\": [\n          {\n            \"policyType\": \"CUSTOM_CONSTRAINT\"\n          }\n        ]\n      }\n    }\n  }\n}",
+			`{
+  "protoPayload": {
+    "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
+    "policyViolationInfo": {
+      "orgPolicyViolationInfo": {
+        "violationInfo": [
+          {
+            "policyType": "CUSTOM_CONSTRAINT"
+          }
+        ]
+      }
+    }
+  }
+}`,
 			log{
 				Body: map[string]any{
 					"@type":               "type.googleapis.com/google.cloud.audit.AuditLog",
@@ -152,7 +129,20 @@ func TestProtoFieldTypes(t *testing.T) {
 		},
 		{
 			"EnumByNumber",
-			"{\n  \"protoPayload\": {\n    \"@type\": \"type.googleapis.com/google.cloud.audit.AuditLog\",\n    \"policyViolationInfo\": {\n      \"orgPolicyViolationInfo\": {\n        \"violationInfo\": [\n          {\n            \"policyType\": 3\n          }\n        ]\n      }\n    }\n  }\n}",
+			`{
+  "protoPayload": {
+    "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
+    "policyViolationInfo": {
+      "orgPolicyViolationInfo": {
+        "violationInfo": [
+          {
+            "policyType": 3
+          }
+        ]
+      }
+    }
+  }
+}`,
 			log{
 				Body: map[string]any{
 					"@type":               "type.googleapis.com/google.cloud.audit.AuditLog",
@@ -162,7 +152,12 @@ func TestProtoFieldTypes(t *testing.T) {
 		},
 		{
 			"BestEffortAnyType",
-			"{\n  \"protoPayload\": {\n    \"@type\": \"type.examples/does.not.Exist\",\n    \"noName\": \"Foobar\"\n  }\n}",
+			`{
+  "protoPayload": {
+    "@type": "type.examples/does.not.Exist",
+    "noName": "Foobar"
+  }
+}`,
 			log{
 				Body: map[string]any{
 					"noName": "Foobar",
@@ -176,18 +171,15 @@ func TestProtoFieldTypes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		fn := func(t *testing.T, want log) {
-			extension := newConfiguredExtension(t, &config)
-			defer assert.NoError(t, extension.Shutdown(context.Background()))
+			extension := newTestExtension(t, config)
 
-			var errs error
-			wantRes, wantLr, err := generateLog(t, want)
-			errs = multierr.Append(errs, err)
+			wantRes, err := generateLog(t, want)
+			require.NoError(t, err)
 
-			gotRes, gotLr, err := extension.translateLogEntry([]byte(tt.input))
-			errs = multierr.Append(errs, err)
-			errs = multierr.Combine(errs, compareResources(wantRes, gotRes), compareLogRecords(wantLr, gotLr))
+			gotRes, err := extension.translateLogEntry([]byte(tt.input))
+			require.NoError(t, err)
 
-			require.NoError(t, errs)
+			require.NoError(t, plogtest.CompareLogs(wantRes, gotRes))
 		}
 		t.Run(tt.scenario, func(t *testing.T) {
 			fn(t, tt.expected)
@@ -235,18 +227,15 @@ func TestProtoErrors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		fn := func(t *testing.T, want log) {
-			extension := newConfiguredExtension(t, &config)
-			defer assert.NoError(t, extension.Shutdown(context.Background()))
+			extension := newTestExtension(t, config)
 
-			var errs error
-			wantRes, wantLr, err := generateLog(t, want)
-			errs = multierr.Append(errs, err)
+			wantRes, err := generateLog(t, want)
+			require.NoError(t, err)
 
-			gotRes, gotLr, translateError := extension.translateLogEntry([]byte(tt.input))
-			errs = multierr.Combine(errs, compareResources(wantRes, gotRes), compareLogRecords(wantLr, gotLr))
+			gotRes, err := extension.translateLogEntry([]byte(tt.input))
+			require.ErrorContains(t, err, tt.error)
 
-			assert.ErrorContains(t, translateError, tt.error)
-			require.NoError(t, errs)
+			require.NoError(t, plogtest.CompareLogs(wantRes, gotRes))
 		}
 		t.Run(tt.scenario, func(t *testing.T) {
 			fn(t, tt.expected)
