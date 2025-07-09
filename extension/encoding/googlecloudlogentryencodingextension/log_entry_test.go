@@ -6,64 +6,11 @@ package googlecloudlogentryencodingextension
 import (
 	stdjson "encoding/json"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
 )
-
-type log struct {
-	Timestamp          string
-	ObservedTimestamp  string
-	Body               any
-	SeverityText       string
-	SeverityNumber     plog.SeverityNumber
-	Attributes         map[string]any
-	ResourceAttributes map[string]any
-	SpanID             string
-	TraceID            string
-}
-
-func generateLog(t *testing.T, log log) (plog.Logs, error) {
-	logs := plog.NewLogs()
-	rl := logs.ResourceLogs().AppendEmpty()
-
-	res := rl.Resource()
-	require.NoError(t, res.Attributes().FromRaw(log.ResourceAttributes))
-
-	lr := rl.ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
-	err := lr.Attributes().FromRaw(log.Attributes)
-	if err != nil {
-		return logs, err
-	}
-	if log.Timestamp != "" {
-		ts, err := time.Parse(time.RFC3339, log.Timestamp)
-		if err != nil {
-			return logs, err
-		}
-		lr.SetTimestamp(pcommon.NewTimestampFromTime(ts))
-	}
-
-	if log.ObservedTimestamp != "" {
-		ots, err := time.Parse(time.RFC3339, log.ObservedTimestamp)
-		if err != nil {
-			return logs, err
-		}
-		lr.SetObservedTimestamp(pcommon.NewTimestampFromTime(ots))
-	}
-
-	require.NoError(t, lr.Body().FromRaw(log.Body))
-	lr.SetSeverityText(log.SeverityText)
-	lr.SetSeverityNumber(log.SeverityNumber)
-
-	spanID, _ := spanIDStrToSpanIDBytes(log.SpanID)
-	lr.SetSpanID(spanID)
-	traceID, _ := traceIDStrToTraceIDBytes(log.TraceID)
-	lr.SetTraceID(traceID)
-
-	return logs, nil
-}
 
 func TestCloudLoggingTraceToTraceIDBytes(t *testing.T) {
 	t.Parallel()

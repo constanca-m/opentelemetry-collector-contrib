@@ -65,103 +65,96 @@ func TestProtoPayload(t *testing.T) {
 }
 
 func TestProtoFieldTypes(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
-		scenario string
-		input    string
-		expected log
+		scenario     string
+		input        []byte
+		expectedBody any
 	}{
 		{
-			"String",
-			`{
+			scenario: "String",
+			input: []byte(`{
   "protoPayload": {
     "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
     "serviceName": "OpenTelemetry"
   }
-}`,
-			log{
-				Body: map[string]any{
-					"@type":       "type.googleapis.com/google.cloud.audit.AuditLog",
-					"serviceName": "OpenTelemetry",
-				},
+}`),
+			expectedBody: map[string]any{
+				"@type":       "type.googleapis.com/google.cloud.audit.AuditLog",
+				"serviceName": "OpenTelemetry",
 			},
 		},
 		{
-			"Boolean",
-			`{
+			scenario: "Boolean",
+			input: []byte(`{
   "protoPayload": {
-    "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
-    "authorizationInfo": [
-      {
-        "granted": true
-      }
-    ]
+	"@type": "type.googleapis.com/google.cloud.audit.AuditLog",
+	"authorizationInfo": [
+	  {
+		"granted": true
+	  }
+	]
   }
-}`,
-			log{
-				Body: map[string]any{
-					"@type":             "type.googleapis.com/google.cloud.audit.AuditLog",
-					"authorizationInfo": []any{map[string]any{"granted": true}},
-				},
+}`),
+			expectedBody: map[string]any{
+				"@type":             "type.googleapis.com/google.cloud.audit.AuditLog",
+				"authorizationInfo": []any{map[string]any{"granted": true}},
+			},
+		},
+
+		{
+			scenario: "EnumByString",
+			input: []byte(`{
+  "protoPayload": {
+	"@type": "type.googleapis.com/google.cloud.audit.AuditLog",
+	"policyViolationInfo": {
+	  "orgPolicyViolationInfo": {
+		"violationInfo": [
+		  {
+			"policyType": "CUSTOM_CONSTRAINT"
+		  }
+		]
+	  }
+	}
+  }
+}`),
+			expectedBody: map[string]any{
+				"@type":               "type.googleapis.com/google.cloud.audit.AuditLog",
+				"policyViolationInfo": map[string]any{"orgPolicyViolationInfo": map[string]any{"violationInfo": []any{map[string]any{"policyType": "CUSTOM_CONSTRAINT"}}}},
 			},
 		},
 		{
-			"EnumByString",
-			`{
+			scenario: "EnumByNumber",
+			input: []byte(`{
   "protoPayload": {
-    "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
-    "policyViolationInfo": {
-      "orgPolicyViolationInfo": {
-        "violationInfo": [
-          {
-            "policyType": "CUSTOM_CONSTRAINT"
-          }
-        ]
-      }
-    }
+	"@type": "type.googleapis.com/google.cloud.audit.AuditLog",
+	"policyViolationInfo": {
+	  "orgPolicyViolationInfo": {
+		"violationInfo": [
+		  {
+			"policyType": 3
+		  }
+		]
+	  }
+	}
   }
-}`,
-			log{
-				Body: map[string]any{
-					"@type":               "type.googleapis.com/google.cloud.audit.AuditLog",
-					"policyViolationInfo": map[string]any{"orgPolicyViolationInfo": map[string]any{"violationInfo": []any{map[string]any{"policyType": "CUSTOM_CONSTRAINT"}}}},
-				},
+}`),
+			expectedBody: map[string]any{
+				"@type":               "type.googleapis.com/google.cloud.audit.AuditLog",
+				"policyViolationInfo": map[string]any{"orgPolicyViolationInfo": map[string]any{"violationInfo": []any{map[string]any{"policyType": "CUSTOM_CONSTRAINT"}}}},
 			},
 		},
 		{
-			"EnumByNumber",
-			`{
+			scenario: "BestEffortAnyType",
+			input: []byte(`{
   "protoPayload": {
-    "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
-    "policyViolationInfo": {
-      "orgPolicyViolationInfo": {
-        "violationInfo": [
-          {
-            "policyType": 3
-          }
-        ]
-      }
-    }
+	"@type": "type.examples/does.not.Exist",
+	"noName": "Foobar"
   }
-}`,
-			log{
-				Body: map[string]any{
-					"@type":               "type.googleapis.com/google.cloud.audit.AuditLog",
-					"policyViolationInfo": map[string]any{"orgPolicyViolationInfo": map[string]any{"violationInfo": []any{map[string]any{"policyType": "CUSTOM_CONSTRAINT"}}}},
-				},
-			},
-		},
-		{
-			"BestEffortAnyType",
-			`{
-  "protoPayload": {
-    "@type": "type.examples/does.not.Exist",
-    "noName": "Foobar"
-  }
-}`,
-			log{
-				Body: map[string]any{
-					"noName": "Foobar",
-				},
+}`),
+			expectedBody: map[string]any{
+				"noName": "Foobar",
 			},
 		},
 	}
@@ -170,53 +163,67 @@ func TestProtoFieldTypes(t *testing.T) {
 		HandleProtoPayloadAs: HandleAsProtobuf,
 	}
 	for _, tt := range tests {
-		fn := func(t *testing.T, want log) {
+		t.Run(tt.scenario, func(t *testing.T) {
 			extension := newTestExtension(t, config)
 
-			wantRes, err := generateLog(t, want)
+			gotRes, err := extension.UnmarshalLogs(tt.input)
 			require.NoError(t, err)
 
-			gotRes, err := extension.translateLogEntry([]byte(tt.input))
-			require.NoError(t, err)
+			require.Equal(t, 1, gotRes.LogRecordCount())
 
-			require.NoError(t, plogtest.CompareLogs(wantRes, gotRes))
-		}
-		t.Run(tt.scenario, func(t *testing.T) {
-			fn(t, tt.expected)
+			lr := gotRes.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0)
+			require.Equal(t, tt.expectedBody, lr.Body().AsRaw())
 		})
 	}
 }
 
 func TestProtoErrors(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
-		scenario string
-		input    string
-		error    string
-		expected log
+		scenario     string
+		input        []byte
+		expectsErr   string
+		expectedBody any
+		expectedAttr map[string]any
 	}{
 		{
-			"UnknownJSONName",
-			"{\n  \"protoPayload\": {\n    \"@type\": \"type.googleapis.com/google.cloud.audit.AuditLog\",\n    \"ServiceName\": 42\n  }\n}",
-			"google.cloud.audit.AuditLog has no known field with JSON name ServiceName",
-			log{
-				Attributes: map[string]any{
-					"gcp.proto_payload": map[string]any{},
-				},
-				Body: map[string]any{},
+			scenario: "UnknownJSONName",
+			input: []byte(`{
+  "protoPayload": {
+    "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
+    "ServiceName": 42
+  }
+}`),
+			expectsErr: "google.cloud.audit.AuditLog has no known field with JSON name ServiceName",
+			expectedAttr: map[string]any{
+				"gcp.proto_payload": map[string]any{},
 			},
+			expectedBody: map[string]any{},
 		},
 		{
-			"EnumTypeError",
-			"{\n  \"protoPayload\": {\n    \"@type\": \"type.googleapis.com/google.cloud.audit.AuditLog\",\n    \"policyViolationInfo\": {\n      \"orgPolicyViolationInfo\": {\n        \"violationInfo\": [\n          {\n            \"policyType\": {}\n          }\n        ]\n      }\n    }\n  }\n}",
-			"wrong type for enum: object",
-			log{
-				Body: map[string]any{
+			scenario: "EnumTypeError",
+			input: []byte(`{
+  "protoPayload": {
+    "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
+    "policyViolationInfo": {
+      "orgPolicyViolationInfo": {
+        "violationInfo": [
+          {
+            "policyType": {}
+          }
+        ]
+      }
+    }
+  }
+}`),
+			expectsErr: "wrong type for enum: object",
+			expectedBody: map[string]any{
+				"policyViolationInfo": map[string]any{"orgPolicyViolationInfo": map[string]any{"violationInfo": []any{map[string]any{"policyType": nil}}}},
+			},
+			expectedAttr: map[string]any{
+				"gcp.proto_payload": map[string]any{
 					"policyViolationInfo": map[string]any{"orgPolicyViolationInfo": map[string]any{"violationInfo": []any{map[string]any{"policyType": nil}}}},
-				},
-				Attributes: map[string]any{
-					"gcp.proto_payload": map[string]any{
-						"policyViolationInfo": map[string]any{"orgPolicyViolationInfo": map[string]any{"violationInfo": []any{map[string]any{"policyType": nil}}}},
-					},
 				},
 			},
 		},
@@ -226,19 +233,21 @@ func TestProtoErrors(t *testing.T) {
 		HandleProtoPayloadAs: HandleAsProtobuf,
 	}
 	for _, tt := range tests {
-		fn := func(t *testing.T, want log) {
+		t.Run(tt.scenario, func(t *testing.T) {
 			extension := newTestExtension(t, config)
 
-			wantRes, err := generateLog(t, want)
-			require.NoError(t, err)
+			gotRes, err := extension.translateLogEntry(tt.input)
+			if tt.expectsErr != "" {
+				require.ErrorContains(t, err, tt.expectsErr)
+			} else {
+				require.NoError(t, err)
+			}
 
-			gotRes, err := extension.translateLogEntry([]byte(tt.input))
-			require.ErrorContains(t, err, tt.error)
+			require.Equal(t, 1, gotRes.LogRecordCount())
 
-			require.NoError(t, plogtest.CompareLogs(wantRes, gotRes))
-		}
-		t.Run(tt.scenario, func(t *testing.T) {
-			fn(t, tt.expected)
+			lr := gotRes.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0)
+			require.Equal(t, tt.expectedBody, lr.Body().AsRaw())
+			require.Equal(t, tt.expectedAttr, lr.Attributes().AsRaw())
 		})
 	}
 }
