@@ -51,6 +51,7 @@ linters:
     - usetesting
     - wastedassign
     - whitespace
+    - contextcheck
 
   exclusions:
     # which dirs to skip: issues from them won't be reported;
