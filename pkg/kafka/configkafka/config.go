@@ -144,8 +144,8 @@ type ConsumerConfig struct {
 
 	// GroupRebalanceStrategy specifies the strategy to use for partition assignment.
 	// Built-in values are "range", "roundrobin", "sticky", and "cooperative-sticky".
-	// Any other value is treated as the component ID of a registered
-	// kafkagroupbalancer.GroupBalancer extension.
+	// Any other value is treated as the component ID of a registered extension
+	// that implements kgo.GroupBalancer.
 	//
 	// Defaults to "cooperative-sticky".
 	GroupRebalanceStrategy GroupRebalanceStrategy `mapstructure:"group_rebalance_strategy,omitempty"`

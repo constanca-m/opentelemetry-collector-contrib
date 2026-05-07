@@ -86,7 +86,7 @@ The following settings can be optionally configured:
   - `roundrobin`: Assigns partitions across all topics in a round-robin fashion. See [RoundRobinAssignor](https://kafka.apache.org/31/javadoc/org/apache/kafka/clients/consumer/RoundRobinAssignor.html).
   - `sticky`: Minimises partition movement across rebalances. See [StickyAssignor](https://kafka.apache.org/31/javadoc/org/apache/kafka/clients/consumer/StickyAssignor.html).
   - `cooperative-sticky`: Like `sticky`, but uses cooperative (incremental) rebalancing to avoid a full stop-the-world rebalance. See [CooperativeStickyAssignor](https://kafka.apache.org/31/javadoc/org/apache/kafka/clients/consumer/CooperativeStickyAssignor.html).
-  - Any other value is interpreted as the component ID of a registered [`kafkagroupbalancer`](../../extension/kafkagroupbalancer/README.md) extension, which allows a custom partition-assignment strategy to be plugged in.
+  - Any other value is interpreted as the component ID of a registered extension that implements `kgo.GroupBalancer`, which allows a custom partition-assignment strategy to be plugged in.
 - `group_instance_id`: A unique identifier for the consumer instance within a consumer group.
   - If set to a non-empty string, the consumer is treated as a static member of the group. This means that the consumer will maintain its partition assignments across restarts and rebalances, as long as it rejoins the group with the same `group_instance_id`.
   - If set to an empty string (or not set), the consumer is treated as a dynamic member. In this case, the consumer's partition assignments may change during rebalances.

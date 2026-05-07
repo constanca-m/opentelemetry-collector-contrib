@@ -29,7 +29,6 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/oauth2"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/kafkagroupbalancer"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/kafka/configkafka"
 )
 
@@ -207,7 +206,7 @@ func NewFranzClusterAdminClient(
 // balancerOptFromStrategy returns a kgo.Opt that sets the group balancer, or
 // nil if strategy is empty (franz-go default applies). Built-in strategy names
 // map to the corresponding kgo balancer. Any other value is treated as a
-// component ID referencing a kafkagroupbalancer.GroupBalancer extension.
+// component ID referencing an extension that implements kgo.GroupBalancer.
 func balancerOptFromStrategy(strategy configkafka.GroupRebalanceStrategy, host component.Host) (kgo.Opt, error) {
 	switch strategy {
 	case "":
@@ -232,9 +231,9 @@ func balancerOptFromStrategy(strategy configkafka.GroupRebalanceStrategy, host c
 		if !ok {
 			return nil, fmt.Errorf("group_rebalance_strategy extension %q not found", id)
 		}
-		balancer, ok := ext.(kafkagroupbalancer.GroupBalancer)
+		balancer, ok := ext.(kgo.GroupBalancer)
 		if !ok {
-			return nil, fmt.Errorf("extension %q does not implement kafkagroupbalancer.GroupBalancer", id)
+			return nil, fmt.Errorf("extension %q does not implement kgo.GroupBalancer", id)
 		}
 		return kgo.Balancers(balancer), nil
 	}

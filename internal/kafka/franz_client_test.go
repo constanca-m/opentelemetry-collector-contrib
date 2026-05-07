@@ -29,7 +29,6 @@ import (
 	"go.uber.org/zap/zaptest"
 	"go.uber.org/zap/zaptest/observer"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/kafkagroupbalancer"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/kafka/kafkatest"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/kafka/configkafka"
 )
@@ -441,7 +440,7 @@ func TestBalancerOptFromStrategy(t *testing.T) {
 			host: &mockHost{extensions: map[component.ID]component.Component{
 				balancerExtID: &nopComponent{},
 			}},
-			wantErr: `does not implement kafkagroupbalancer.GroupBalancer`,
+			wantErr: `does not implement kgo.GroupBalancer`,
 		},
 		"extension_ok": {
 			strategy: "my_balancer",
@@ -663,12 +662,16 @@ func (m *mockHost) GetExtensions() map[component.ID]component.Component {
 }
 
 // nopComponent is a component.Component that does not implement GroupBalancer.
-type nopComponent struct{ extension.Extension }
+type nopComponent struct {
+	extension.Extension
+}
 
-// mockGroupBalancer is a no-op kafkagroupbalancer.GroupBalancer used in tests.
-type mockGroupBalancer struct{ extension.Extension }
+// mockGroupBalancer is a no-op kgo.GroupBalancer used in tests.
+type mockGroupBalancer struct {
+	extension.Extension
+}
 
-var _ kafkagroupbalancer.GroupBalancer = (*mockGroupBalancer)(nil)
+var _ kgo.GroupBalancer = (*mockGroupBalancer)(nil)
 
 func (*mockGroupBalancer) ProtocolName() string {
 	return "mock"

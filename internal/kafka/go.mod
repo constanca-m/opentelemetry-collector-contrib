@@ -5,7 +5,6 @@ go 1.25.0
 require (
 	github.com/IBM/sarama v1.48.0
 	github.com/aws/aws-msk-iam-sasl-signer-go v1.0.4
-	github.com/open-telemetry/opentelemetry-collector-contrib/extension/kafkagroupbalancer v0.0.0
 	github.com/open-telemetry/opentelemetry-collector-contrib/pkg/kafka/configkafka v0.151.0
 	github.com/rcrowley/go-metrics v0.0.0-20250401214520-65e299d6c5c9
 	github.com/stretchr/testify v1.11.1
@@ -97,6 +96,5 @@ require (
 )
 
 replace (
-	github.com/open-telemetry/opentelemetry-collector-contrib/extension/kafkagroupbalancer => ../../extension/kafkagroupbalancer
 	github.com/open-telemetry/opentelemetry-collector-contrib/pkg/kafka/configkafka => ../../pkg/kafka/configkafka
 )
