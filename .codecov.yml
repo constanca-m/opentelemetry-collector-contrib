@@ -357,6 +357,10 @@ component_management:
     name: extension_k8sleaderelector
     paths:
     - extension/k8sleaderelector/**
+  - component_id: extension_kafkagroupbalancer
+    name: extension_kafkagroupbalancer
+    paths:
+    - extension/kafkagroupbalancer/**
   - component_id: extension_mcp
     name: extension_mcp
     paths:
