@@ -121,17 +121,9 @@ func (c *franzConsumer) runPartitionWorker(pc *pc, tp topicPartition) {
 				if !pc.mailbox.hasPendingOffsetChange() {
 					break
 				}
-				if !c.sendControl(partitionControl{
-					tp: tp,
-					pc: pc,
-				}) {
+				if !c.applyMailboxRewind(pc, tp, partition) {
 					return
 				}
-				pc.mailbox.resumeAfterOffsetChange(func() {
-					if pc.clearPauseReasons(partitionPauseRewind | partitionPauseBackpressure) {
-						c.client.ResumeFetchPartitions(partition)
-					}
-				})
 				break
 			}
 
@@ -156,17 +148,9 @@ func (c *franzConsumer) runPartitionWorker(pc *pc, tp topicPartition) {
 				}
 			}
 			if result.rewindRecord != nil {
-				if !c.sendControl(partitionControl{
-					tp: tp,
-					pc: pc,
-				}) {
+				if !c.applyMailboxRewind(pc, tp, partition) {
 					return
 				}
-				pc.mailbox.resumeAfterOffsetChange(func() {
-					if pc.clearPauseReasons(partitionPauseRewind | partitionPauseBackpressure) {
-						c.client.ResumeFetchPartitions(partition)
-					}
-				})
 				break
 			}
 			if result.terminal {
@@ -176,6 +160,20 @@ func (c *franzConsumer) runPartitionWorker(pc *pc, tp topicPartition) {
 			}
 		}
 	}
+}
+
+// applyMailboxRewind asks the poll loop to apply the pending rewind, then
+// resumes fetching. Returns false if this partition or the receiver is stopping.
+func (c *franzConsumer) applyMailboxRewind(pc *pc, tp topicPartition, partition map[string][]int32) bool {
+	if !c.sendControl(partitionControl{tp: tp, pc: pc}) {
+		return false
+	}
+	pc.mailbox.resumeAfterOffsetChange(func() {
+		if pc.clearPauseReasons(partitionPauseRewind | partitionPauseBackpressure) {
+			c.client.ResumeFetchPartitions(partition)
+		}
+	})
+	return true
 }
 
 // processPartitionBatch processes one partition batch in both legacy and

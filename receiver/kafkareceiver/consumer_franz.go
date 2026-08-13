@@ -69,9 +69,8 @@ type franzConsumer struct {
 	// opsMu prevents assignment callbacks and rewinds from racing commits.
 	opsMu sync.Mutex
 
-	pollMu          sync.Mutex
-	pollCancel      context.CancelFunc
-	pollInterrupted bool
+	pollMu     sync.Mutex
+	pollCancel context.CancelFunc
 
 	// brokerReadOpts caches MeasurementOptions for OnBrokerRead, which fires on
 	// every fetch request. Entries are evicted in OnBrokerDisconnect; growth is
@@ -231,10 +230,9 @@ func (c *franzConsumer) consumeLoop(ctx context.Context) {
 // be called in a loop until consume returns false.
 func (c *franzConsumer) consume(ctx context.Context, size int) bool {
 	var fetch kgo.Fetches
-	var controlInterrupted bool
 	if c.config.PartitionProcessing.Independent {
 		c.processControls()
-		fetch, controlInterrupted = c.pollRecords(ctx, size)
+		fetch = c.pollRecords(ctx, size)
 		defer c.client.AllowRebalance()
 	} else {
 		// Poll interruption is only required by independent partition workers.
@@ -250,7 +248,7 @@ func (c *franzConsumer) consume(ctx context.Context, size int) bool {
 	// simply be logged and keep fetching.
 	var hasError bool
 	fetch.EachError(func(topic string, partition int32, err error) {
-		if controlInterrupted && errors.Is(err, context.Canceled) {
+		if c.config.PartitionProcessing.Independent && errors.Is(err, context.Canceled) {
 			return
 		}
 		c.settings.Logger.Error("consumer fetch error", zap.Error(err),
@@ -333,14 +331,12 @@ func (c *franzConsumer) consume(ctx context.Context, size int) bool {
 
 // pollRecords records the active poll cancellation function so a worker can
 // wake the poll loop when an offset operation must run.
-func (c *franzConsumer) pollRecords(ctx context.Context, size int) (kgo.Fetches, bool) {
+func (c *franzConsumer) pollRecords(ctx context.Context, size int) kgo.Fetches {
 	pollCtx, cancel := context.WithCancel(ctx)
 	c.pollMu.Lock()
 	c.pollCancel = cancel
-	c.pollInterrupted = false
 	if len(c.controls) > 0 && c.opsMu.TryLock() {
 		c.opsMu.Unlock()
-		c.pollInterrupted = true
 		cancel()
 	}
 	c.pollMu.Unlock()
@@ -348,12 +344,10 @@ func (c *franzConsumer) pollRecords(ctx context.Context, size int) (kgo.Fetches,
 	fetch := c.client.PollRecords(pollCtx, size)
 
 	c.pollMu.Lock()
-	interrupted := c.pollInterrupted
 	c.pollCancel = nil
-	c.pollInterrupted = false
 	c.pollMu.Unlock()
 	cancel()
-	return fetch, interrupted
+	return fetch
 }
 
 // sendControl hands an offset operation to the poll loop and waits for it to
@@ -384,7 +378,6 @@ func (c *franzConsumer) interruptPoll() {
 	c.pollMu.Lock()
 	defer c.pollMu.Unlock()
 	if c.pollCancel != nil {
-		c.pollInterrupted = true
 		c.pollCancel()
 	}
 }
