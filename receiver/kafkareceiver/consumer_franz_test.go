@@ -75,6 +75,33 @@ func TestPartitionProcessing(t *testing.T) {
 		h.requireNotCommitted(0)
 	})
 
+	t.Run("slow commit does not stall other partition", func(t *testing.T) {
+		h := newPartitionProcessingHarness(t, 2, func(cfg *Config) {
+			cfg.ConsumerConfig.AutoCommit.Enable = false
+			cfg.ConsumerConfig.MaxFetchSize = 1
+			cfg.MessageMarking.After = true
+		})
+		var healthy atomic.Int64
+		h.start(func(_ context.Context, record *kgo.Record, _ attribute.Set) error {
+			if record.Partition == 1 {
+				healthy.Add(1)
+			}
+			return nil
+		})
+		commitStarted, unblock := h.blockOffsetCommits()
+		defer unblock()
+
+		h.produce(0, "blocked commit")
+		waitSignal(t, commitStarted, "partition 0 did not attempt an offset commit")
+		for range 5 {
+			h.produce(1, "healthy")
+		}
+		waitAtomic(t, &healthy, 5)
+		unblock()
+		h.requireCommitted(0, 1)
+		h.requireCommitted(1, 5)
+	})
+
 	t.Run("pending rewind does not block polling", func(t *testing.T) {
 		// Poll continues for a healthy partition while a commit is stuck and a
 		// rewind is pending.
@@ -94,7 +121,7 @@ func TestPartitionProcessing(t *testing.T) {
 			}
 			return nil
 		})
-		// Broker holds OffsetCommit so the worker keeps opsMu during
+		// Broker holds OffsetCommit so the commit loop keeps opsMu during
 		// CommitRecords.
 		commitStarted, unblock := h.blockOffsetCommits()
 		defer unblock()
@@ -262,8 +289,8 @@ func TestPartitionProcessing(t *testing.T) {
 			}
 			return errors.New("trigger rewind")
 		})
-		// Fail the OffsetCommit that follows the rewind. The worker keeps
-		// pendingCommit at the last accepted record (offset 0, next commit 1).
+		// Fail the OffsetCommit that follows the rewind. The coordinator keeps
+		// the last accepted record (offset 0, next commit 1).
 		var rejectFirst atomic.Bool
 		rejectFirst.Store(true)
 		h.cluster.ControlKey(int16(kmsg.OffsetCommit), func(request kmsg.Request) (kmsg.Response, error, bool) {
@@ -282,9 +309,116 @@ func TestPartitionProcessing(t *testing.T) {
 		h.produce(0, "accepted")
 		h.produce(0, "rewound")
 		waitSignal(t, retried, "failed record was not fetched again")
-		// lost() waits for the worker, then commits pendingCommit.
-		h.revoke(0)
+		// lost() waits for the worker, then flushes the coordinator.
+		h.revoke()
 		h.requireCommitted(0, 1)
+	})
+
+	t.Run("revocation flushes after failed background commit", func(t *testing.T) {
+		h := newPartitionProcessingHarness(t, 1, func(cfg *Config) {
+			cfg.ConsumerConfig.AutoCommit.Enable = false
+			cfg.MessageMarking.After = true
+		})
+		processed := make(chan struct{}, 1)
+		h.start(func(_ context.Context, _ *kgo.Record, _ attribute.Set) error {
+			notify(processed)
+			return nil
+		})
+		commitAttempted := make(chan struct{}, 1)
+		var rejectFirst atomic.Bool
+		rejectFirst.Store(true)
+		h.cluster.ControlKey(int16(kmsg.OffsetCommit), func(request kmsg.Request) (kmsg.Response, error, bool) {
+			h.cluster.KeepControl()
+			if !rejectFirst.Swap(false) {
+				return nil, nil, false
+			}
+			notify(commitAttempted)
+			response := retryOffsetCommitResponse(request.(*kmsg.OffsetCommitRequest))
+			for i := range response.Topics {
+				for j := range response.Topics[i].Partitions {
+					response.Topics[i].Partitions[j].ErrorCode = kerr.GroupAuthorizationFailed.Code
+				}
+			}
+			return response, nil, true
+		})
+		h.produce(0, "accepted")
+		waitSignal(t, processed, "record was not processed")
+		waitSignal(t, commitAttempted, "background commit was not attempted")
+		require.Eventually(t, func() bool {
+			if !h.consumer.opsMu.TryLock() {
+				return false
+			}
+			h.consumer.opsMu.Unlock()
+			return true
+		}, 5*time.Second, 10*time.Millisecond)
+		h.revoke()
+		h.requireCommitted(0, 1)
+	})
+
+	t.Run("revocation flush times out on stuck commit", func(t *testing.T) {
+		h := newPartitionProcessingHarness(t, 1, func(cfg *Config) {
+			cfg.ConsumerConfig.AutoCommit.Enable = false
+			cfg.MessageMarking.After = true
+		})
+		processed := make(chan struct{}, 1)
+		h.start(func(_ context.Context, _ *kgo.Record, _ attribute.Set) error {
+			notify(processed)
+			return nil
+		})
+		h.consumer.config.ConsumerConfig.SessionTimeout = 200 * time.Millisecond
+		commitStarted, unblock := h.blockOffsetCommits()
+		defer unblock()
+		h.produce(0, "accepted")
+		waitSignal(t, processed, "record was not processed")
+		waitSignal(t, commitStarted, "offset commit was not attempted")
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			h.revoke()
+		}()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("revocation flush did not return after session timeout")
+		}
+	})
+
+	t.Run("revocation wait does not freeze other partition commits", func(t *testing.T) {
+		h := newPartitionProcessingHarness(t, 2, func(cfg *Config) {
+			cfg.ConsumerConfig.AutoCommit.Enable = false
+			cfg.MessageMarking.After = true
+		})
+		var entered0 atomic.Bool
+		release0 := make(chan struct{})
+		h.start(func(_ context.Context, record *kgo.Record, _ attribute.Set) error {
+			if record.Partition == 0 {
+				entered0.Store(true)
+				<-release0
+			}
+			return nil
+		})
+		h.produce(0, "hold")
+		require.Eventually(t, entered0.Load, 5*time.Second, 10*time.Millisecond)
+		h.produce(1, "healthy")
+		h.requireCommitted(1, 1)
+
+		revoked := make(chan struct{})
+		go func() {
+			defer close(revoked)
+			h.revoke()
+		}()
+		require.Never(t, func() bool {
+			select {
+			case <-revoked:
+				return true
+			default:
+				return false
+			}
+		}, 200*time.Millisecond, 10*time.Millisecond)
+		h.produce(1, "still committing")
+		h.requireCommitted(1, 2)
+		close(release0)
+		<-revoked
 	})
 
 	t.Run("before marking commits", func(t *testing.T) {
@@ -321,7 +455,7 @@ func TestPartitionProcessing(t *testing.T) {
 				h.produce(0, "record")
 				if tc.interrupt {
 					waitSignal(t, processing, "record did not start processing")
-					h.revoke(0)
+					h.revoke()
 				}
 				h.requireCommitted(0, 1)
 			})
@@ -542,9 +676,9 @@ func (h *partitionProcessingHarness) waitPaused(want int) {
 	}, 5*time.Second, 10*time.Millisecond)
 }
 
-func (h *partitionProcessingHarness) revoke(partition int32) {
+func (h *partitionProcessingHarness) revoke() {
 	h.t.Helper()
-	h.consumer.lost(h.t.Context(), nil, map[string][]int32{h.topic: {partition}}, false)
+	h.consumer.lost(h.t.Context(), nil, map[string][]int32{h.topic: {0}}, false)
 }
 
 func (h *partitionProcessingHarness) assignment(partition int32) *pc {
@@ -1029,6 +1163,87 @@ func TestLostFatalWait(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLostFatal(t *testing.T) {
+	t.Run("drops lost offsets", func(t *testing.T) {
+		consumer := newIndependentManualConsumer(t, 2)
+		lostTP := topicPartition{topic: "test", partition: 0}
+		keptTP := topicPartition{topic: "test", partition: 1}
+		assignPartition(t, consumer, lostTP)
+		consumer.commits.report(lostTP, commitRecord("test", 0, 5))
+		consumer.commits.report(keptTP, commitRecord("test", 1, 7))
+
+		consumer.lost(t.Context(), nil, map[string][]int32{"test": {0}}, true)
+
+		require.Equal(t, []*kgo.Record{commitRecord("test", 1, 7)}, consumer.commits.takeAll())
+	})
+
+	t.Run("pauses commit during wait", func(t *testing.T) {
+		consumer := newIndependentManualConsumer(t, 1)
+		tp := topicPartition{topic: "test", partition: 0}
+		partitionConsumer := assignPartition(t, consumer, tp)
+		partitionConsumer.wg.Add(1)
+		consumer.commits.report(tp, commitRecord("test", 0, 5))
+
+		lostDone := make(chan struct{})
+		go func() {
+			defer close(lostDone)
+			consumer.lost(t.Context(), nil, map[string][]int32{"test": {0}}, true)
+		}()
+		require.Eventually(t, func() bool {
+			return partitionConsumer.ctx.Err() != nil
+		}, 5*time.Second, 10*time.Millisecond)
+		require.Eventually(t, func() bool {
+			if consumer.opsMu.TryLock() {
+				consumer.opsMu.Unlock()
+				return false
+			}
+			return true
+		}, 5*time.Second, 10*time.Millisecond)
+		ok, err := consumer.commits.withAttempt(time.Second, func(context.Context) error {
+			t.Fatal("attempt must not start while paused")
+			return nil
+		})
+		require.NoError(t, err)
+		require.False(t, ok)
+
+		partitionConsumer.wg.Done()
+		<-lostDone
+		require.Empty(t, consumer.commits.takeAll())
+	})
+
+	t.Run("ignores late report", func(t *testing.T) {
+		consumer := newIndependentManualConsumer(t, 1)
+		tp := topicPartition{topic: "test", partition: 0}
+		partitionConsumer := assignPartition(t, consumer, tp)
+
+		consumer.lost(t.Context(), nil, map[string][]int32{"test": {0}}, true)
+		consumer.reportPartitionCommit(partitionConsumer, tp, commitRecord("test", 0, 9))
+		require.Empty(t, consumer.commits.takeAll())
+	})
+}
+
+func newIndependentManualConsumer(t *testing.T, partitions int32) *franzConsumer {
+	t.Helper()
+	client, cfg := mustNewFakeCluster(t, kfake.SeedTopics(partitions, "test"))
+	cfg.PartitionProcessing.Independent = true
+	cfg.ConsumerConfig.AutoCommit.Enable = false
+	settings, _, _ := mustNewSettings(t)
+	consumer, err := newFranzKafkaConsumer(cfg, settings, []string{"test"}, nil, nil)
+	require.NoError(t, err)
+	consumer.client = client
+	consumer.commits = newCommitCoordinator(t.Context())
+	return consumer
+}
+
+func assignPartition(t *testing.T, consumer *franzConsumer, tp topicPartition) *pc {
+	t.Helper()
+	ctx, cancel := context.WithCancelCause(t.Context())
+	t.Cleanup(func() { cancel(nil) })
+	partitionConsumer := &pc{ctx: ctx, cancel: cancel}
+	consumer.assignments[tp] = partitionConsumer
+	return partitionConsumer
 }
 
 // TestResumePartitionsAfterRebalance verifies that partitions paused due to

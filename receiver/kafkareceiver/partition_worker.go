@@ -45,9 +45,6 @@ type pc struct {
 	mailbox *partitionMailbox
 	// pauseReasons stores a bitmask of partitionPauseReason values.
 	pauseReasons atomic.Uint32
-	// pendingCommit preserves processed progress if the synchronous commit
-	// fails. The revocation callback reads it after waiting for this worker.
-	pendingCommit *kgo.Record
 
 	// mu prevents cancellation from racing a new wg.Add.
 	mu sync.RWMutex
@@ -135,17 +132,7 @@ func (c *franzConsumer) runPartitionWorker(pc *pc, tp topicPartition) {
 				})
 			}
 			if result.commitRecord != nil {
-				pc.pendingCommit = result.commitRecord
-				c.opsMu.Lock()
-				err := c.client.CommitRecords(pc.ctx, result.commitRecord)
-				c.unlockOpsAndWakePoll()
-				if err == nil {
-					pc.pendingCommit = nil
-				}
-				if err != nil && pc.ctx.Err() == nil {
-					pc.logger.Error("failed to commit partition offset", zap.Error(err))
-					c.reportRecoverable(err)
-				}
+				c.reportPartitionCommit(pc, tp, result.commitRecord)
 			}
 			if result.rewindRecord != nil {
 				if !c.applyMailboxRewind(pc, tp, partition) {
@@ -162,10 +149,26 @@ func (c *franzConsumer) runPartitionWorker(pc *pc, tp topicPartition) {
 	}
 }
 
+// reportPartitionCommit stores progress only while this worker still owns the
+// assignment. A worker that outlives fatal-loss cleanup must not restore a
+// discarded offset.
+func (c *franzConsumer) reportPartitionCommit(pc *pc, tp topicPartition, rec *kgo.Record) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.assignments[tp] != pc {
+		return
+	}
+	c.commits.report(tp, rec)
+}
+
 // applyMailboxRewind asks the poll loop to apply the pending rewind, then
 // resumes fetching. Returns false if this partition or the receiver is stopping.
 func (c *franzConsumer) applyMailboxRewind(pc *pc, tp topicPartition, partition map[string][]int32) bool {
-	if !c.sendControl(partitionControl{tp: tp, pc: pc}) {
+	if !c.sendControl(partitionControl{
+		tp:      tp,
+		pc:      pc,
+		applied: make(chan bool, 1),
+	}) {
 		return false
 	}
 	pc.mailbox.resumeAfterOffsetChange(func() {
@@ -187,8 +190,8 @@ func (c *franzConsumer) applyMailboxRewind(pc *pc, tp topicPartition, partition 
 //   - Legacy with autocommit disabled marks records here. consume commits all
 //     marked partitions after the fetched batch finishes.
 //   - Independent with autocommit disabled does not mark records here. It
-//     returns the last accepted record, then the worker commits that partition
-//     synchronously and retains failed commit progress for revocation.
+//     returns the last accepted record. The worker reports that offset to the
+//     commit coordinator and continues processing.
 func (c *franzConsumer) processPartitionBatch(ctx context.Context, pc *pc, p kgo.FetchTopicPartition) partitionBatchResult {
 	// Only independent mode with autocommit disabled commits per partition.
 	partitionScopedCommit := c.config.PartitionProcessing.Independent && !c.config.ConsumerConfig.AutoCommit.Enable
@@ -288,8 +291,8 @@ func (c *franzConsumer) processPartitionBatch(ctx context.Context, pc *pc, p kgo
 		metric.WithAttributeSet(pc.attrs),
 	)
 	if partitionScopedCommit {
-		// The independent worker commits this record after this function
-		// returns.
+		// The independent worker reports this record to the commit coordinator
+		// after this function returns.
 		result.commitRecord = lastProcessed
 	} else if c.config.MessageMarking.After {
 		// In all other modes, After=true marks the latest accepted record after

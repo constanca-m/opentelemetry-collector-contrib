@@ -65,6 +65,8 @@ type franzConsumer struct {
 	assignments map[topicPartition]*pc
 	// controls serializes SetOffsets between PollRecords calls.
 	controls chan partitionControl
+	// commits owns pending offsets and the independent-mode commit loop.
+	commits *commitCoordinator
 
 	// opsMu prevents assignment callbacks and rewinds from racing commits.
 	opsMu sync.Mutex
@@ -108,7 +110,6 @@ func newFranzKafkaConsumer(
 		consumerClosed:   make(chan struct{}),
 		closing:          make(chan struct{}),
 		assignments:      make(map[topicPartition]*pc),
-		controls:         make(chan partitionControl, 1),
 		brokerReadOpts:   make(map[brokerReadKey]metric.MeasurementOption),
 	}, nil
 }
@@ -176,6 +177,7 @@ func (c *franzConsumer) Start(ctx context.Context, host component.Host) error {
 		// assigned/lost can run between PollRecords and dispatch, so a fetch
 		// can be given to the wrong worker or dropped. AllowRebalance is called
 		// after dispatch.
+		c.controls = make(chan partitionControl, 1)
 		opts = append(opts, kgo.BlockRebalanceOnPoll())
 	}
 
@@ -205,6 +207,10 @@ func (c *franzConsumer) Start(ctx context.Context, host component.Host) error {
 	}
 	c.consumeMessage = cm
 
+	if c.config.PartitionProcessing.Independent && !c.config.ConsumerConfig.AutoCommit.Enable {
+		c.commits = newCommitCoordinator(context.Background())
+		c.commits.start(c.closing, c.commitPendingOffsets)
+	}
 	go c.consumeLoop(context.Background())
 	return nil
 }
@@ -353,7 +359,6 @@ func (c *franzConsumer) pollRecords(ctx context.Context, size int) kgo.Fetches {
 // sendControl hands an offset operation to the poll loop and reports whether
 // it was applied, unless this partition or the receiver is stopping.
 func (c *franzConsumer) sendControl(control partitionControl) bool {
-	control.applied = make(chan bool, 1)
 	select {
 	case c.controls <- control:
 		// PollRecords may otherwise wait indefinitely while this worker needs
@@ -485,6 +490,9 @@ func (c *franzConsumer) Shutdown(ctx context.Context) error {
 		return context.Cause(ctx)
 	case <-c.consumerClosed:
 	}
+	if c.commits != nil {
+		c.commits.wait()
+	}
 
 	return nil
 }
@@ -504,6 +512,9 @@ func (c *franzConsumer) triggerShutdown() bool {
 		return true
 	default:
 		close(c.closing)
+		if c.commits != nil {
+			c.commits.stop()
+		}
 		client := c.client
 		c.mu.Unlock()
 		// Close the client without holding the write mutex, otherwise, the
@@ -600,22 +611,34 @@ func (c *franzConsumer) lost(ctx context.Context, _ *kgo.Client,
 		}
 	}
 	c.mu.Unlock()
+	manualIndependent := independent && !c.config.ConsumerConfig.AutoCommit.Enable
+	if fatal && manualIndependent {
+		// Stop the commit loop before taking opsMu so it cannot commit a
+		// fatally lost offset.
+		c.commits.pause()
+		defer c.commits.resume()
+	}
 
 	// Legacy fatal loss returns immediately so the callback stays inside the
 	// rebalance timeout. Independent mode has a persistent worker, so wait for
 	// it before allowing a replacement worker to start.
 	if fatal {
 		if independent {
-			c.waitForPartitionConsumers(ctx, stopping)
-			// Pointer identity prevents this cleanup from deleting a newer
-			// assignment if one appeared while the callback was waiting.
-			c.deleteStoppingAssignments(stopping)
+			c.finishFatalLoss(ctx, stopping, manualIndependent)
 		}
 		return
 	}
 
 	for _, pc := range stopping {
 		pc.wg.Wait()
+	}
+
+	if manualIndependent {
+		// Pause only after the worker wait so other partitions keep committing
+		// while a revoked worker exits. Pause then lock closes the gap where a
+		// new attempt could take opsMu before the flush.
+		c.commits.pause()
+		defer c.commits.resume()
 	}
 
 	c.opsMu.Lock()
@@ -626,19 +649,70 @@ func (c *franzConsumer) lost(ctx context.Context, _ *kgo.Client,
 	// is persisted before the partition is reassigned to another consumer,
 	// avoiding duplicate processing by the next owner.
 	var err error
-	if independent && !c.config.ConsumerConfig.AutoCommit.Enable {
-		records := make([]*kgo.Record, 0, len(stopping))
-		for _, pc := range stopping {
-			if pc.pendingCommit != nil {
-				records = append(records, pc.pendingCommit)
-			}
+	if manualIndependent {
+		commitCtx, cancel := context.WithTimeout(ctx, c.config.ConsumerConfig.SessionTimeout)
+		defer cancel()
+		records := c.commits.take(stoppingPartitions(stopping))
+		if len(records) > 0 {
+			err = c.client.CommitRecords(commitCtx, records...)
 		}
-		err = c.client.CommitRecords(ctx, records...)
 	} else {
 		err = c.client.CommitMarkedOffsets(ctx)
 	}
 	if err != nil {
 		c.settings.Logger.Error("failed to commit offsets", zap.Error(err))
+		c.reportRecoverable(err)
+	}
+}
+
+// finishFatalLoss waits for lost independent workers, then drops their
+// assignment and any uncommitted offsets. Callers that pass manual=true must
+// already have paused the commit loop.
+func (c *franzConsumer) finishFatalLoss(ctx context.Context, stopping map[topicPartition]*pc, manual bool) {
+	if manual {
+		// Hold opsMu across the worker wait so the commit loop cannot take a
+		// lost offset and assigned() cannot install a replacement worker.
+		c.opsMu.Lock()
+		defer c.unlockOpsAndWakePoll()
+	}
+	c.waitForPartitionConsumers(ctx, stopping)
+	// Pointer identity prevents this cleanup from deleting a newer
+	// assignment if one appeared while the callback was waiting.
+	c.deleteStoppingAssignments(stopping)
+	if manual {
+		// Drop offsets for partitions this consumer no longer owns.
+		c.commits.take(stoppingPartitions(stopping))
+	}
+}
+
+// commitPendingOffsets is the independent-mode commit loop body when
+// autocommit is disabled. Workers report offsets and continue. This method
+// batches those offsets into one CommitRecords call. Autocommit and legacy
+// processing do not call it.
+func (c *franzConsumer) commitPendingOffsets() {
+	c.opsMu.Lock()
+	defer c.unlockOpsAndWakePoll()
+
+	_, err := c.commits.withAttempt(c.config.ConsumerConfig.SessionTimeout, func(ctx context.Context) error {
+		// Take every pending record while opsMu is held so revocation cannot
+		// return before this attempt finishes.
+		records := c.commits.takeAll()
+		if len(records) == 0 {
+			return nil
+		}
+		err := c.client.CommitRecords(ctx, records...)
+		if err != nil {
+			// Put the records back. Keep a newer report that arrived during
+			// this attempt. The next report or a revocation flush retries.
+			c.commits.restore(records)
+		}
+		return err
+	})
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
+		c.settings.Logger.Error("failed to commit partition offset", zap.Error(err))
 		c.reportRecoverable(err)
 	}
 }
@@ -680,6 +754,14 @@ func (c *franzConsumer) deleteStoppingAssignments(stopping map[topicPartition]*p
 			delete(c.assignments, tp)
 		}
 	}
+}
+
+func stoppingPartitions(stopping map[topicPartition]*pc) []topicPartition {
+	tps := make([]topicPartition, 0, len(stopping))
+	for tp := range stopping {
+		tps = append(tps, tp)
+	}
+	return tps
 }
 
 // handleMessage is called on a per-partition basis.
